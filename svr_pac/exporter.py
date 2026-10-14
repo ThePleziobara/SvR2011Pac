@@ -43,7 +43,7 @@ def find_armature(context):
 def bound_meshes(context, arm, selected_only):
     out = []
     for o in context.scene.objects:
-        if o.type != "MESH" or "svr_child" in o:          # 'svr_child': pieces imported from the base PAC
+        if o.type != "MESH" in o:          
             continue
         if not any(m.type == "ARMATURE" and m.object == arm for m in o.modifiers):
             continue
@@ -177,8 +177,8 @@ def export_pac(context, filepath, base_path="", alpha=47, atlas_scale=1.0, emd_i
     base = base_path or arm["svr_pac"]
     if not os.path.exists(base):
         raise ValueError("Base PAC not found: %s" % base)
-    if os.path.abspath(base) == os.path.abspath(filepath):
-        raise ValueError("The output file cannot be the base PAC.")
+    #if os.path.abspath(base) == os.path.abspath(filepath):
+    #    raise ValueError("The output file cannot be the base PAC.")
     meshes = bound_meshes(context, arm, selected_only)
     if not meshes:
         raise ValueError("No visible meshes bound to %s (Armature modifier)." % arm.name)
