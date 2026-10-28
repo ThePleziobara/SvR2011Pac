@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "svr_pac"
-version = "0.3.2"
+version = "0.4.3"
 name = "SvR 2011 PAC"
 tagline = "Import and export WWE SmackDown vs. Raw 2011 (PC) ch*.pac files"
 maintainer = "pleziobara"

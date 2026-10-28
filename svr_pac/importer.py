@@ -7,6 +7,9 @@ Orientation: in the game's PACs the normals and the triangle winding point INWAR
 volume; verified on every base PAC). Both are flipped on import so they point outwards in Blender
 (blue faces in Face Orientation); exporter.py does the opposite.
 The vertices are already in bind pose, so the armature is created in that pose.
+Each bone keeps its node data (svr_index, svr_child, svr_t, svr_r) and svr_rot, the rotation that takes
+the bone's rest frame to the game node's frame, so the exporter can write back moved hair chains.
+The physics of each hair chain (child 0x3c) is stored on its root bone as svr_hair_<parameter>.
 """
 import os
 
@@ -16,6 +19,7 @@ from mathutils import Vector
 
 from . import dds
 from .jboy import NO_PAL, Jboy
+from .pac_builder import ALPHA_FLAG, HAIR_PARAMS, HAIR_PARAMS_ID, hair_params_read
 from .pac_container import Pac
 
 # game -> Blender (proper rotation, det = +1: it does not change the triangle winding)
@@ -28,6 +32,7 @@ LABELS = {0: "body", 0x2710: "hair", 0x4E20: "lash",
           0x7530: "blood_face", 0x7531: "blood_body", 0x7532: "blood_hair"}
 BLOOD = (0x7530, 0x7531, 0x7532)       # blood layers (textures BloodFace/BloodBody/BloodHair)
 WARNING = "warning: "                  # prefix of report lines shown as warnings by the operator
+HAIR_PROP = "svr_hair_%s"              # custom properties of a hair chain's root bone (physics, 0x3c)
 
 
 def child_label(cid):
@@ -52,22 +57,27 @@ class TextureLibrary:
         self.images = {}
         self.missing = set()
 
-    def image(self, name):
+    def image(self, name, normal=False):
+        """Blender image of a texture. normal=True: normal map converted to Blender's convention
+        (dds.flip_normal_xy), non-color data; its alpha is the game's specular mask."""
         if name is None:
             return None
-        key = name.lower()
+        key = (name.lower(), normal)
         if key in self.images:
             return self.images[key]
         img = None
-        if key in self.dds:
-            real, d = self.dds[key]
+        if key[0] in self.dds:
+            real, d = self.dds[key[0]]
             try:
                 px = dds.decode(d)
             except ValueError:
                 px = None
             if px is not None:
                 h, w = px.shape[:2]
-                img = bpy.data.images.new("%s_%s" % (self.prefix, real), w, h, alpha=True)
+                if normal:
+                    px = dds.flip_normal_xy(px)
+                img = bpy.data.images.new("%s_%s" % (self.prefix, real), w, h, alpha=True,
+                                          is_data=normal)
                 # the DDS goes top to bottom; Blender stores rows bottom to top
                 img.pixels.foreach_set((np.flipud(px).astype(np.float32) / 255.0).ravel())
                 img.alpha_mode = "CHANNEL_PACKED"            # alpha = gloss, not transparency
@@ -78,7 +88,9 @@ class TextureLibrary:
         return img
 
 
-def make_material(name, image, shader):
+def make_material(name, image, shader, normal=None, transparent=False):
+    """normal: normal map image (Blender convention); transparent: alpha-blended mesh (hair, eyelashes),
+    whose 'color' alpha is transparency instead of gloss."""
     mat = bpy.data.materials.new(name)
     mat["svr_shader"] = shader
     if hasattr(mat, "use_nodes") and not mat.use_nodes:
@@ -92,7 +104,20 @@ def make_material(name, image, shader):
         tex.image = image
         tex.location = (bsdf.location.x - 320, bsdf.location.y)
         nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
-        # the alpha of 'color' is the game's gloss: it is not connected (still available on the node)
+        # the alpha of 'color' is the game's gloss: it is only connected on alpha-blended meshes
+        if transparent:
+            nt.links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
+            if hasattr(mat, "surface_render_method"):            # Blender 4.2+
+                mat.surface_render_method = "BLENDED"
+            mat.use_backface_culling = False
+    if normal is not None:
+        ntex = nt.nodes.new("ShaderNodeTexImage")
+        ntex.image = normal
+        ntex.location = (bsdf.location.x - 600, bsdf.location.y - 320)
+        nmap = nt.nodes.new("ShaderNodeNormalMap")
+        nmap.location = (bsdf.location.x - 280, bsdf.location.y - 320)
+        nt.links.new(ntex.outputs["Color"], nmap.inputs["Color"])
+        nt.links.new(nmap.outputs["Normal"], bsdf.inputs["Normal"])
     return mat
 
 
@@ -143,6 +168,10 @@ def build_armature(context, nodes, scale, name, collection):
         eb["svr_child"] = n.get("child", 0)
         eb["svr_t"] = [float(v) for v in n["t"]]
         eb["svr_r"] = [float(v) for v in n["r"]]
+        # game node frame in the bone's rest frame (inverse of the exporter's)
+        eb["svr_rot"] = [float(v) for v in (np.array(eb.matrix.to_3x3()).T @ rots[i]).ravel()]
+        for k, v in zip(HAIR_PARAMS, n.get("hair", ())):
+            eb[HAIR_PROP % k] = int(round(v)) if k == "attach" else float(v)
         ebones.append(eb)
     for eb, n in zip(ebones, nodes):                   # a parent may come after its child
         if n["parent"] >= 0:
@@ -309,10 +338,18 @@ def import_pac(context, filepath, scale=0.1, model=0, extras=True, textures=True
             agree += int((np.einsum("ij,ij->i", fn, vn) > 0).sum())        # winding consistent with normal
             total += len(T)
             work.append((cid, j, k, m, T, names, P, N))
+        if cid != 0 and cid not in BLOOD:
+            for i, nm in enumerate(names):       # whole hair chains, even the bones no vertex uses
+                if nm.startswith("kami"):
+                    add_bone(i)
     # the winding has to follow the normal; since the normal is flipped (game: inwards), the winding
     # is flipped too, except in the unusual case where they did not agree in the PAC
     flip = not (total and agree < total / 2)
 
+    hair = hair_params_read(pac.child(HAIR_PARAMS_ID, model)) if pac.has(HAIR_PARAMS_ID, model) else {}
+    for n in bones:
+        if n["name"] in hair and n.get("child", 0):
+            n["hair"] = hair[n["name"]]
     arm_obj = build_armature(context, bones, scale, stem + "_armature", coll)
     arm_obj["svr_pac"] = filepath
     arm_obj["svr_model"] = model
@@ -331,10 +368,15 @@ def import_pac(context, filepath, scale=0.1, model=0, extras=True, textures=True
         groups = mesh_groups(m, names)
 
         tex = j.mesh_texture(m) if textures else None
-        key = (tex.lower() if tex else None, m.shader)
+        ntex = j.mesh_texture(m, "texNormal") if textures else None
+        transparent = bool(int.from_bytes(m.record[136:140], "big") & ALPHA_FLAG)
+        key = (tex.lower() if tex else None, ntex.lower() if ntex else None, m.shader, transparent)
         if key not in materials:
             img = texlib.image(tex) if textures else None
-            materials[key] = make_material("%s_%s_%s" % (stem, tex or "no_texture", m.shader), img, m.shader)
+            nimg = texlib.image(ntex, normal=True) if ntex else None
+            materials[key] = make_material("%s_%s_%s%s" % (stem, tex or "no_texture", m.shader,
+                                                           "_alpha" if transparent else ""),
+                                           img, m.shader, nimg, transparent)
         name = "%s_%s_%02d" % (stem, child_label(cid), k)
         obj = build_mesh(name, P, N, UV, T, groups, coll, arm_obj, materials[key])
         obj["svr_child"] = cid
@@ -350,6 +392,9 @@ def import_pac(context, filepath, scale=0.1, model=0, extras=True, textures=True
         report.append("outfit %d of %d" % (model, len(pac.models)))
     if rebound:
         report.append("bind pose different from the body's, corrected in: " + ", ".join(sorted(rebound)))
+    chains = sorted(n["name"] for n in bones if "hair" in n)
+    if chains:
+        report.append("hair physics of %d chains on their root bones (svr_hair_*)" % len(chains))
     if texlib.missing:
         report.append(WARNING + "textures not found: " + ", ".join(sorted(texlib.missing)))
     return arm_obj, report

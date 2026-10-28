@@ -39,7 +39,8 @@ class IMPORT_SCENE_OT_svr_pac(bpy.types.Operator, ImportHelper):
         description="Also import the other JBOY models of the PAC (hair, eyelashes, accessories)")
     textures: BoolProperty(
         name="Textures", default=True,
-        description="Create the materials with the PAC 'color' texture (its alpha is the game's gloss)")
+        description="Create the materials with the PAC 'color' texture (its alpha is the game's gloss) "
+                    "and its 'normal' map (converted to Blender's convention)")
     blood: BoolProperty(
         name="Blood layers", default=False,
         description="Also import the blood meshes (JBOY 0x7530-0x7532), which cover face, chest and hair")
@@ -82,8 +83,12 @@ class EXPORT_SCENE_OT_svr_pac(bpy.types.Operator, ExportHelper):
         description="Alpha of the 'color' texture: the game uses it as gloss (47 on ch100's skin)")
     specular: IntProperty(
         name="Specular (normal alpha)", default=12, min=0, max=255,
-        description="Alpha of the flat 'normal' texture, which the game uses as the specular mask "
+        description="Alpha of the 'normal' texture, which the game uses as the specular mask "
                     "(game characters: ~18 on skin, ~7 on clothes). Higher = shinier")
+    normal_dx: BoolProperty(
+        name="DirectX normal maps", default=False,
+        description="The materials' normal maps use the DirectX convention (Unreal, 3ds Max, Substance "
+                    "'DirectX' preset): invert their green channel. Blender's Normal Map node expects OpenGL")
     atlas_scale: FloatProperty(
         name="Texture scale", default=1.0, min=0.125, max=8.0,
         description="Scale of each image before packing them into the atlas (2 = double resolution)")
@@ -109,6 +114,7 @@ class EXPORT_SCENE_OT_svr_pac(bpy.types.Operator, ExportHelper):
             layout.label(text=str(e), icon="ERROR")
         layout.prop(self, "alpha")
         layout.prop(self, "specular")
+        layout.prop(self, "normal_dx")
         layout.prop(self, "atlas_scale")
         layout.prop(self, "emd_id")
         layout.prop(self, "blood")
@@ -120,7 +126,7 @@ class EXPORT_SCENE_OT_svr_pac(bpy.types.Operator, ExportHelper):
         try:
             log = exporter.export_pac(context, self.filepath, bpy.path.abspath(self.base_path), self.alpha,
                                       self.atlas_scale, self.emd_id, self.selected_only, self.specular,
-                                      self.blood)
+                                      self.blood, self.normal_dx)
         except (ValueError, OSError, RuntimeError) as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}

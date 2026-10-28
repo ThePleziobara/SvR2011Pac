@@ -8,6 +8,11 @@ Texture pack (children 0xA..0xF, little-endian; textures are looked up BY NAME):
 Formats seen in ch100: DXT1, DXT5 and uncompressed A4R4G4B4 (Mask1/Mask2).
 Reading: only level 0 is decoded (no mips). Writing: DXT5 with every mipmap,
 and solid-color or zeroed textures (to neutralize normal, Mk and Mask*).
+
+'normal' (texNormal of yBumpMapSS) is a tangent-space normal map (blue ~255) whose alpha is the
+specular mask. Its red AND green are inverted with respect to Blender's (OpenGL) convention: integrating
+ch100's map with that convention gives the nose, lips and muscles in relief, and the opposite one
+sinks them (2026-10-24). The vertices carry no tangents: the shader derives them.
 """
 import struct
 
@@ -248,6 +253,14 @@ def make_dds_dxt5(img):
     hdr[84:88] = b"DXT5"
     struct.pack_into("<I", hdr, 108, 0x401008)              # caps: complex | texture | mipmap
     return bytes(hdr) + b"".join(mips)
+
+
+def flip_normal_xy(img):
+    """Normal map game <-> Blender (OpenGL): inverts red and green (the conversion is its own inverse).
+    RGBA uint8; alpha (specular mask in the game) is kept."""
+    out = img.copy()
+    out[..., 0:2] = 255 - out[..., 0:2]
+    return out
 
 
 def dds_solid(like, rgb, alpha=255):
